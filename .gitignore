@@ -1,0 +1,20 @@
+# Compiler and linker output
+*.o
+lib/libutils.a
+crawler/crawler
+indexer/indexer
+test/pageio_test
+test/wordscan_test
+test/index_test
+test/indexio_test
+
+# Downloaded page directories and temporary logs
+pages/
+pages-depth-*/
+pageio-test-pages/
+*.index
+words-*.txt
+*.log
+
+# macOS metadata
+.DS_Store
