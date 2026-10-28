@@ -6,6 +6,7 @@
 #include "webpage.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -330,37 +331,95 @@ static bool pagedir_is_readable(const char *pagedir)
     return valid;
 }
 
-/* Load consecutive numbered pages so all of them contribute to one index. */
+/* Find the highest page ID so pages after a broken one are still checked. */
+static int32_t find_last_page_id(const char *pagedir, int *last_page_idp)
+{
+    DIR *directory;
+    struct dirent *entry;
+    int page_id;
+    int last_page_id = 0;
+    int32_t status = 1;
+
+    /* Open the page directory so its numbered filenames can be checked. */
+    directory = opendir(pagedir);
+    if (directory == NULL || last_page_idp == NULL) {
+        if (directory != NULL) {
+            (void)closedir(directory);
+        }
+        return status;
+    }
+
+    /* Convert each filename and remember the largest numbered page. */
+    entry = readdir(directory);
+    while (entry != NULL) {
+        page_id = atoi(entry->d_name);
+        if (page_id > last_page_id) {
+            last_page_id = page_id;
+        }
+        entry = readdir(directory);
+    }
+
+    /* Return the largest page ID only after the directory closes cleanly. */
+    if (closedir(directory) == 0) {
+        *last_page_idp = last_page_id;
+        status = 0;
+    }
+
+    return status;
+}
+
+/* Try every numbered page so one broken page does not stop the indexer. */
 static int32_t build_index(const char *pagedir, index_t *index,
                            int *page_countp, uint64_t *word_countp)
 {
-    webpage_t *page;
+    webpage_t *page = NULL;
     int document_id = 1;
+    int last_document_id = 0;
     int32_t status = 0;
 
-    /* Stop at the first missing page because page IDs must be consecutive. */
-    page = pageload(document_id, (char *)pagedir);
-    while (page != NULL && status == 0) {
-        status = index_page(index, page, document_id, word_countp);
-        webpage_delete(page);
-        page = NULL;
+    /* Find where the numbered sequence should end before loading any page. */
+    if (find_last_page_id(pagedir, &last_document_id) != 0) {
+        fprintf(stderr, "indexer: could not inspect the page directory\n");
+        return 1;
+    }
 
-        /* Count only a page whose accepted words were added successfully. */
-        if (status == 0) {
-            (*page_countp)++;
+    /* Require at least one numbered page before building the index. */
+    if (last_document_id == 0) {
+        fprintf(stderr, "indexer: pagedir contains no numbered pages\n");
+        return 1;
+    }
+
+    /* Load every page in order, and skip broken ones that cannot be loaded. */
+    while (document_id <= last_document_id && status == 0) {
+        page = pageload(document_id, (char *)pagedir);
+        if (page == NULL) {
+            fprintf(stderr,
+                    "indexer: skipping page %d because it could not be loaded\n",
+                    document_id);
+        } else {
+            status = index_page(index, page, document_id, word_countp);
+            webpage_delete(page);
+            page = NULL;
+
+            /* Count the page only after all of its words were indexed. */
+            if (status == 0) {
+                (*page_countp)++;
+            }
+        }
+
+        /* Continue until every numbered position through the last ID was tried. */
+        if (document_id < last_document_id) {
             document_id++;
-            page = pageload(document_id, (char *)pagedir);
+        } else {
+            break;
         }
     }
 
-    /* Treat a missing page 1 as an error because indexing must begin there. */
+    /* Fail only when none of the numbered pages could be indexed. */
     if (status == 0 && *page_countp == 0) {
-        fprintf(stderr, "indexer: pagedir contains no page 1\n");
+        fprintf(stderr, "indexer: no numbered pages could be loaded\n");
         status = 1;
     }
-
-    /* Free a loaded page that could not be completely indexed. */
-    webpage_delete(page);
 
     return status;
 }
